@@ -32,7 +32,7 @@ def get_cdp_full_match(input_str):
     match = re.search(CDP_FULL_REGEX, input_str)
     if match:
         match_dict = dict()
-        match_dict["device"] = match.group("device").split(".")[0]
+        match_dict["device_id"] = match.group("device").split(".")[0]
         match_dict["ip_address"] = match.group("ip_address")
         match_dict["platform"] = match.group("platform")
         match_dict["interface"] = compact_cdp_det_interface(match.group("interface"))
@@ -113,10 +113,11 @@ def build_switch_html_table(hostname, po_list):
     return html
 
 
-def process_device(device_dict, graph, visited_devices, radius):
+def process_device(device_dict, graph, visited_devices, last_device, radius):
     radius = radius + 1
-    print("processing device: {0} {1} {2}".format(radius, len(visited_devices), device_dict["IP_ADDRESS"]))
-    visited_devices.append(device_dict["IP_ADDRESS"])
+    print("processing device: {0} {1} {2} / {3}".format(radius, len(visited_devices), device_dict["DEVICE_ID"],
+                                                        device_dict["IP_ADDRESS"]))
+    visited_devices.append(device_dict["DEVICE_ID"])
     try:
         device_conn = netmiko.ConnectHandler(device_type="cisco_ios",
                                              ip=device_dict["IP_ADDRESS"],
@@ -125,24 +126,27 @@ def process_device(device_dict, graph, visited_devices, radius):
                                              keepalive=30)
 
         device_conn.send_command("terminal length 0")
-        hostname = device_conn.find_prompt()
+        hostname = device_conn.find_prompt()[:-1]
         cdp_output_raw = device_conn.send_command("show cdp neighbors detail")
         device_conn.send_command("terminal length 30")
 
         cdp_entries = parse_cdp_detail_raw(cdp_output_raw)
 
-        graph.node(hostname[:-1])
+        graph.node(hostname)
 
         for entry in cdp_entries:
             if entry["cisco"]:
-                if entry["ip_address"] not in visited_devices:
-                    graph.node(entry["device"])
-
-                graph.edge(hostname, entry["device"])
+                # if entry["device_id"] not in visited_devices:
+                if entry["device_id"] != last_device:
+                    graph.edge(hostname, entry["device_id"])
+                #    graph.node(entry["device"])
 
                 if radius <= MAX_RADIUS:
                     device_dict["IP_ADDRESS"] = entry["ip_address"]
-                    graph, visited_devices = process_device(device_dict, graph, visited_devices, radius)
+                    device_dict["DEVICE_ID"] = entry["device_id"]
+                    graph, visited_devices = process_device(device_dict, graph, visited_devices, hostname, radius)
+                else:
+                    graph.node(entry["device_id"])
 
         device_conn.disconnect()
     except (netmiko.ssh_exception.NetMikoTimeoutException,
@@ -153,13 +157,28 @@ def process_device(device_dict, graph, visited_devices, radius):
     return graph, visited_devices
 
 
+def just_get_hostname(device_dict):
+    device_conn = netmiko.ConnectHandler(device_type="cisco_ios",
+                                         ip=device_dict["IP_ADDRESS"],
+                                         username=device_dict["USERNAME"],
+                                         password=device_dict["PASSWORD"],
+                                         keepalive=30)
+
+    device_conn.send_command("terminal length 0")
+    hostname = device_conn.find_prompt()
+    device_conn.disconnect()
+
+    return hostname[:-1]
+
+
 def main():
     g1 = gv.Graph(format="svg")
     with open("cdpgv_config.json", "r") as json_file:
         d = json.load(json_file)
         for device in d["DEVICES"]:
             try:
-                graph, visited_devices = process_device(device, g1, [], 0)
+                device["DEVICE_ID"] = just_get_hostname(device)
+                graph, visited_devices = process_device(device, g1, [], None, 0)
             except netmiko.ssh_exception.NetMikoTimeoutException as e1:
                 print(e1)
 
